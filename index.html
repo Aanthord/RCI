@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recursive Cosmos — Single‑File Simulation (Offline‑friendly)</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#04060b; color:#cfd8ff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    #app { position:fixed; inset:0; overflow:hidden; }
+    #canvas2d { position:fixed; inset:0; display:none; }
+    .hud { position: fixed; left: 12px; top: 12px; background: rgba(8,12,20,0.6); border:1px solid rgba(255,255,255,0.1); padding:12px 14px; border-radius:14px; backdrop-filter: blur(6px); box-shadow: 0 10px 30px rgba(0,0,0,0.35); }
+    .hud h1 { font-size: 14px; margin:0 0 6px 0; letter-spacing: .08em; font-weight:700; opacity:.9 }
+    .row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+    .label { width:130px; font-size:12px; opacity:.85 }
+    input[type=range] { width:220px; }
+    .small { font-size:11px; opacity:.7 }
+    .btn { display:inline-flex; align-items:center; gap:8px; border:1px solid rgba(255,255,255,0.14); border-radius:10px; padding:6px 10px; cursor:pointer; background: rgba(255,255,255,0.04); }
+    .btn:hover { background: rgba(255,255,255,0.08); }
+    .badge { font-size:10px; padding:3px 6px; border-radius:999px; border:1px solid rgba(255,255,255,0.15); }
+    .legend { position:fixed; right:12px; top:12px; background: rgba(8,12,20,0.45); border:1px solid rgba(255,255,255,0.1); padding:8px 10px; border-radius:12px; font-size:12px; backdrop-filter: blur(6px); }
+    .legend div { margin:2px 0; }
+    a { color:#9dd6ff; text-decoration: none; }
+    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; background: rgba(200,40,60,0.12); color:#ffd7dd; border:1px solid rgba(255,80,120,0.35); padding:10px 14px; border-radius:12px; font-size:12px; display:none }
+    .toast.show{ display:block }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <canvas id="canvas2d"></canvas>
+  <div class="hud">
+    <h1>Recursive Cosmos <span class="badge">single‑file</span></h1>
+    <div class="row"><span class="label">Recursion rate α̇</span><input id="rate" type="range" min="0" max="2" step="0.001" value="0.35"><span id="rateVal" class="small">0.35</span></div>
+    <div class="row"><span class="label">Twist λ (ω‑coupling)</span><input id="twist" type="range" min="0" max="3" step="0.001" value="1.1"><span id="twistVal" class="small">1.10</span></div>
+    <div class="row"><span class="label">Curvature gain κ</span><input id="curv" type="range" min="0" max="3" step="0.001" value="0.8"><span id="curvVal" class="small">0.80</span></div>
+    <div class="row"><span class="label">Star threshold θ★</span><input id="thresh" type="range" min="0.2" max="0.98" step="0.001" value="0.76"><span id="threshVal" class="small">0.76</span></div>
+    <div class="row"><span class="label">Boson count</span><input id="count" type="range" min="512" max="20000" step="1" value="6000"><span id="countVal" class="small">6000</span></div>
+    <div class="row"><button id="reset" class="btn">Re‑seed</button><button id="pause" class="btn">Pause</button></div>
+    <div class="small" style="margin-top:6px; max-width:420px; line-height:1.3">Model sketch: φ is a scalar seed; ω = ∇logφ (Weyl 1‑form). Particles approximate graded vector fields; velocities update by a twisted bracket proxy and curvature‑like drift from density Laplacian. Density D ≈ F/G drives star attractors when D ≥ θ★.</div>
+  </div>
+  <div class="legend">
+    <div>Density color map: <span style="color:#72a0ff">low</span> → <span style="color:#c2f0ff">mid</span> → <span style="color:#fff">high</span></div>
+    <div>Wheel/drag to orbit • Double‑click = focus (WebGL). Drag to pan (2D fallback).</div>
+    <div class="small">© PQG — Demo inspired by RSSN · RSF · FTC graded symmetries</div>
+  </div>
+  <div id="toast" class="toast">CDN blocked or offline: using 2D fallback renderer. (WebGL/OrbitControls will auto‑enable when available.)</div>
+
+<script>
+(function(){
+  // ===== Bootloader: try to fetch THREE UMD + OrbitControls; fallback to 2D if blocked =====
+  const SCRIPTS = {
+    three: 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js',
+    orbit: 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js' // UMD attaches to THREE.OrbitControls
+  };
+  const tests = []; // self-tests
+  const assert = (name, cond) => { tests.push({name, pass: !!cond}); if(!cond) console.error('[TEST FAIL]', name); else console.log('[TEST PASS]', name); };
+
+  function loadScript(url){
+    return new Promise((resolve,reject)=>{
+      const s=document.createElement('script'); s.src=url; s.defer=true; s.onload=()=>resolve(url); s.onerror=(e)=>reject(new Error('Load failed: '+url));
+      document.head.appendChild(s);
+    });
+  }
+
+  function showToast(){ document.getElementById('toast').classList.add('show'); }
+
+  // UI handles
+  const el = id => document.getElementById(id);
+  const rate = el('rate'), twist = el('twist'), curv = el('curv'), thresh = el('thresh'), count = el('count');
+  const rateVal = el('rateVal'), twistVal = el('twistVal'), curvVal = el('curvVal'), threshVal = el('threshVal'), countVal = el('countVal');
+  const resetBtn = el('reset'), pauseBtn = el('pause');
+  const fmt = v => (Math.round(v*100)/100).toFixed(2);
+  [ ['rate',rate,rateVal], ['twist',twist,twistVal], ['curv',curv,curvVal], ['thresh',thresh,threshVal], ['count',count,countVal] ].forEach(([name,input,disp]) => { const update = () => disp.textContent = name==='count'? input.value: fmt(parseFloat(input.value)); input.addEventListener('input', update); update(); });
+
+  // Shared math/util
+  function clamp(v,min,max){ return v<min?min: (v>max?max:v); }
+  function hash3(x,y,z){
+    const s = Math.sin(x*127.1 + y*311.7 + z*74.7)*43758.5453;
+    const t = Math.sin(x*269.5 + y*183.3 + z*246.1)*9631.517;
+    const u = Math.sin(x*419.2 + y*371.9 + z*231.2)*1523.17;
+    const fx = (s - Math.floor(s)) * 2.0 - 1.0;
+    const fy = (t - Math.floor(t)) * 2.0 - 1.0;
+    const fz = (u - Math.floor(u)) * 2.0 - 1.0;
+    return {x:fx,y:fy,z:fz};
+  }
+  function phi(p, a){
+    const r2 = p.x*p.x + p.y*p.y + p.z*p.z;
+    return Math.exp(-(r2)/(1.2+0.6*Math.sin(a*0.7+0.5)) ) * (1.0 + 0.12*Math.sin(3.0*p.x+0.7*a)+0.1*Math.cos(2.2*p.z-0.9*a));
+  }
+  function gradLogPhi(p,a){
+    const eps = 0.001;
+    const f1 = Math.log(phi({x:p.x+eps,y:p.y,z:p.z},a));
+    const f2 = Math.log(phi({x:p.x-eps,y:p.y,z:p.z},a));
+    const gx = (f1 - f2)/(2*eps);
+    const g1 = Math.log(phi({x:p.x,y:p.y+eps,z:p.z},a));
+    const g2 = Math.log(phi({x:p.x,y:p.y-eps,z:p.z},a));
+    const gy = (g1 - g2)/(2*eps);
+    const h1 = Math.log(phi({x:p.x,y:p.y,z:p.z+eps},a));
+    const h2 = Math.log(phi({x:p.x,y:p.y,z:p.z-eps},a));
+    const gz = (h1 - h2)/(2*eps);
+    return {x:gx,y:gy,z:gz};
+  }
+
+  // ===== Attempt WebGL path =====
+  (async function start(){
+    let webglReady = false;
+    try {
+      await loadScript(SCRIPTS.three);
+      assert('THREE global present', !!window.THREE && !!THREE.WebGLRenderer);
+      await loadScript(SCRIPTS.orbit);
+      assert('OrbitControls present (UMD)', !!THREE.OrbitControls);
+      webglReady = !!window.THREE;
+    } catch (e) {
+      console.warn('[BOOT] Falling back to 2D due to:', e.message);
+    }
+
+    if (webglReady) initThree(); else initCanvas2D();
+
+    // ===== TESTS that always run =====
+    assert('UI slider exists: rate', !!rate);
+    assert('UI slider exists: twist', !!twist);
+    assert('UI slider exists: curv', !!curv);
+    assert('UI slider exists: thresh', !!thresh);
+    assert('UI slider exists: count', !!count);
+    // extra test: ensure no global `last` sneaks in
+    assert('No global timing var named last', typeof window.last === 'undefined');
+
+    // Show toast if we are on fallback
+    if (!webglReady) showToast();
+  })();
+
+  // ===== Path A: Three.js WebGL renderer =====
+  function initThree(){
+    const app = document.getElementById('app');
+    const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x04060b, 1);
+    app.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.01, 2000);
+    camera.position.set(0, 3.2, 8.5);
+
+    let controls = null;
+    if (THREE.OrbitControls) { controls = new THREE.OrbitControls(camera, renderer.domElement); controls.enableDamping = true; }
+
+    const lightA = new THREE.DirectionalLight(0x88aaff, 0.65); lightA.position.set(5,10,8); scene.add(lightA);
+    const lightB = new THREE.DirectionalLight(0x2244ff, 0.25); lightB.position.set(-6,-4,-8); scene.add(lightB);
+    const amb = new THREE.AmbientLight(0x445588, 0.35); scene.add(amb);
+
+    // Grid + density state
+    const GRID = 42; const BOUNDS = 8.0; const CELL = (2*BOUNDS)/GRID;
+    const density = new Float32Array(GRID*GRID*GRID);
+    const idx = (ix,iy,iz) => ix + GRID*(iy + GRID*iz);
+    const clearDensity = () => density.fill(0);
+
+    // Particles
+    let points, geo, mat, starsGroup = new THREE.Group(); scene.add(starsGroup);
+    function spawnParticles(n){
+      if(points){ scene.remove(points); points.geometry.dispose(); points.material.dispose(); }
+      geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(n*3);
+      const vel = new Float32Array(n*3);
+      const den = new Float32Array(n);
+      for(let i=0;i<n;i++){
+        const dir = new THREE.Vector3().randomDirection();
+        const r = Math.random()*0.02;
+        const p = dir.multiplyScalar(r);
+        pos[i*3+0]=p.x; pos[i*3+1]=p.y; pos[i*3+2]=p.z;
+        const d0 = Math.random()*0.6+0.2;
+        const v = new THREE.Vector3().copy(dir).multiplyScalar(0.6*(0.5+d0));
+        vel[i*3+0]=v.x; vel[i*3+1]=v.y; vel[i*3+2]=v.z;
+        den[i]=d0;
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+      geo.setAttribute('velocity', new THREE.BufferAttribute(vel,3));
+      geo.setAttribute('density', new THREE.BufferAttribute(den,1));
+
+      const vertex = `
+        attribute float density; varying float vD; void main(){ vD = density; vec4 mv = modelViewMatrix * vec4(position,1.0); gl_PointSize = 1.5 + 2.5 * vD * (300.0 / -mv.z); gl_Position = projectionMatrix * mv; }
+      `;
+      const fragment = `
+        precision highp float; varying float vD; void main(){ vec2 uv = gl_PointCoord - 0.5; float r = length(uv); float mask = smoothstep(0.5, 0.0, r); vec3 cLow = vec3(0.38,0.58,1.0); vec3 cMid = vec3(0.76,0.93,1.0); vec3 cHi  = vec3(1.0,1.0,1.0); vec3 col = mix(mix(cLow, cMid, clamp(vD*1.2,0.0,1.0)), cHi, smoothstep(0.7,1.0,vD)); gl_FragColor = vec4(col, mask * (0.6 + 0.4*vD)); }
+      `;
+      mat = new THREE.ShaderMaterial({ vertexShader:vertex, fragmentShader:fragment, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+      points = new THREE.Points(geo, mat); scene.add(points);
+    }
+
+    const starTex = (()=>{ const s=128, c=document.createElement('canvas'); c.width=c.height=s; const g=c.getContext('2d'); const grad=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2); grad.addColorStop(0,'rgba(255,255,255,1)'); grad.addColorStop(0.4,'rgba(210,230,255,0.9)'); grad.addColorStop(1,'rgba(0,0,0,0)'); g.fillStyle=grad; g.fillRect(0,0,s,s); const tx=new THREE.CanvasTexture(c); tx.minFilter=THREE.LinearFilter; tx.magFilter=THREE.LinearFilter; return tx; })();
+    const starMat = new THREE.SpriteMaterial({ map: starTex, color: 0xffffff, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending });
+    function placeStar(pos, scale){ const s = new THREE.Sprite(starMat.clone()); s.position.copy(pos); s.scale.setScalar(scale); starsGroup.add(s); s.userData.phase = Math.random()*Math.PI*2; }
+
+    // State
+    let alpha = 0.0, t = 0.0, paused = false; spawnParticles(parseInt(count.value,10));
+    function reseed(){ alpha = 0.0; t = 0.0; clearDensity(); for (let i = starsGroup.children.length - 1; i >= 0; i--) { const s = starsGroup.children[i]; if (s.material) s.material.dispose(); starsGroup.remove(s);} spawnParticles(parseInt(count.value,10)); }
+    resetBtn.addEventListener('click', reseed);
+    pauseBtn.addEventListener('click', ()=>{ paused=!paused; pauseBtn.textContent = paused? 'Resume' : 'Pause'; });
+
+    function update(dt){
+      alpha += dt * parseFloat(rate.value);
+      const pos = geo.getAttribute('position'); const vel = geo.getAttribute('velocity'); const den = geo.getAttribute('density');
+      clearDensity();
+      const N = pos.count; const twistK = parseFloat(twist.value); const curvK = parseFloat(curv.value);
+      for(let i=0;i<N;i++){
+        const p = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+        const v = new THREE.Vector3(vel.getX(i), vel.getY(i), vel.getZ(i));
+        const gw = gradLogPhi(p, alpha); const X = new THREE.Vector3(...Object.values(hash3(Math.floor(p.x*7.3), Math.floor(p.y*7.3), Math.floor(p.z*7.3)))).normalize(); const Y = new THREE.Vector3(...Object.values(hash3(Math.floor(p.x*5.1+10.0), Math.floor(p.y*5.1-3.0), Math.floor(p.z*5.1+6.0)))).normalize();
+        const s1 = X.dot(gw), s2 = Y.dot(gw); const delta = new THREE.Vector3().copy(Y).multiplyScalar(s1).sub(new THREE.Vector3().copy(X).multiplyScalar(s2)); v.addScaledVector(delta, twistK * dt * 0.45);
+        const r = p.length(); const damp = Math.exp(-Math.max(0, r-6.0)*0.15); v.multiplyScalar(0.999 * damp);
+        vel.setXYZ(i, v.x, v.y, v.z);
+      }
+      for(let i=0;i<N;i++){
+        const p = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)); const v = new THREE.Vector3(vel.getX(i), vel.getY(i), vel.getZ(i)); p.addScaledVector(v, dt); if(p.length() > BOUNDS){ p.multiplyScalar(BOUNDS/(p.length()+1e-6)); v.multiplyScalar(0.8); } pos.setXYZ(i, p.x, p.y, p.z); const ix = clamp(Math.floor((p.x+BOUNDS)/CELL),0,GRID-1); const iy = clamp(Math.floor((p.y+BOUNDS)/CELL),0,GRID-1); const iz = clamp(Math.floor((p.z+BOUNDS)/CELL),0,GRID-1); density[idx(ix,iy,iz)] += 1; }
+      const neigh = [ [-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1] ];
+      function localD(ix,iy,iz){ let F = density[idx(ix,iy,iz)] + 1e-6; let G = 6.0; for(const [dx,dy,dz] of neigh){ const jx = clamp(ix+dx,0,GRID-1), jy=clamp(iy+dy,0,GRID-1), jz=clamp(iz+dz,0,GRID-1); G += density[idx(jx,jy,jz)]*0.2 + 1.0; } return F/G; }
+      const starThresh = parseFloat(thresh.value); const candidates = [];
+      for(let s=0;s<18;s++){ const ix = Math.floor(Math.random()*GRID), iy = Math.floor(Math.random()*GRID), iz = Math.floor(Math.random()*GRID); const D = localD(ix,iy,iz); if(D >= starThresh){ const wp = new THREE.Vector3((ix+0.5)*CELL-BOUNDS, (iy+0.5)*CELL-BOUNDS, (iz+0.5)*CELL-BOUNDS); candidates.push({pos:wp, D}); } }
+      for(const c of candidates){ if(starsGroup.children.length>110) break; placeStar(c.pos, THREE.MathUtils.lerp(0.35, 1.4, c.D)); }
+      for(let i=0;i<N;i++){
+        const p = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)); const v = new THREE.Vector3(vel.getX(i), vel.getY(i), vel.getZ(i)); const ix = clamp(Math.floor((p.x+BOUNDS)/CELL),0,GRID-1); const iy = clamp(Math.floor((p.y+BOUNDS)/CELL),0,GRID-1); const iz = clamp(Math.floor((p.z+BOUNDS)/CELL),0,GRID-1);
+        const center = density[idx(ix,iy,iz)]; let lap = -6.0*center; for(const [dx,dy,dz] of neigh){ lap += density[idx(clamp(ix+dx,0,GRID-1), clamp(iy+dy,0,GRID-1), clamp(iz+dz,0,GRID-1))]; }
+        const grad = new THREE.Vector3( density[idx(clamp(ix+1,0,GRID-1),iy,iz)] - density[idx(clamp(ix-1,0,GRID-1),iy,iz)], density[idx(ix,clamp(iy+1,0,GRID-1),iz)] - density[idx(ix,clamp(iy-1,0,GRID-1),iz)], density[idx(ix,iy,clamp(iz+1,0,GRID-1))] - density[idx(ix,iy,clamp(iz-1,0,GRID-1))] ).multiplyScalar(1/(CELL+1e-6));
+        const drift = grad.multiplyScalar(-parseFloat(curv.value)*0.0008).addScaledVector(new THREE.Vector3(1,1,1).multiplyScalar(lap*1e-6), parseFloat(curv.value)); v.add(drift);
+        vel.setXYZ(i, v.x, v.y, v.z);
+      }
+      for(let i=0;i<N;i++){ const p = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)); const ix = clamp(Math.floor((p.x+BOUNDS)/CELL),0,GRID-1); const iy = clamp(Math.floor((p.y+BOUNDS)/CELL),0,GRID-1); const iz = clamp(Math.floor((p.z+BOUNDS)/CELL),0,GRID-1); const D = clamp(density[idx(ix,iy,iz)]/(density[idx(ix,iy,iz)]+8.0),0.0,1.0); den.setX(i, D); }
+      pos.needsUpdate = true; vel.needsUpdate = true; den.needsUpdate = true;
+      for(const s of starsGroup.children){ s.userData.phase += dt*1.5; const k = 0.9 + 0.1*Math.sin(s.userData.phase); s.scale.setScalar(s.scale.x * 0.98 + 0.02 * s.scale.x * k); s.material.opacity = 0.7 + 0.3*Math.sin(s.userData.phase*0.8); }
+    }
+
+    const clock = new THREE.Clock();
+    function tick(){
+      requestAnimationFrame(tick);
+      const dt = clamp(clock.getDelta(), 0.001, 0.033);
+      if(!paused) update(dt);
+      if(controls) controls.update();
+      renderer.render(scene, camera);
+    }
+    tick();
+
+    window.addEventListener('resize', ()=>{ camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+    window.addEventListener('dblclick', ()=>{ if(controls) controls.target.set(0,0,0); });
+  }
+
+  // ===== Path B: Canvas 2D fallback (no external URLs needed) =====
+  function initCanvas2D(){
+    const c = document.getElementById('canvas2d'); const ctx = c.getContext('2d'); c.style.display='block'; resize2D();
+    window.addEventListener('resize', resize2D);
+    function resize2D(){ c.width = window.innerWidth; c.height = window.innerHeight; }
+
+    // World
+    const GRID = 42; const BOUNDS = 8.0; const CELL = (2*BOUNDS)/GRID; const density = new Float32Array(GRID*GRID*GRID);
+    const idx = (ix,iy,iz) => ix + GRID*(iy + GRID*iz); const clearDensity = () => density.fill(0);
+
+    // Particles
+    let N = parseInt(count.value,10); let P = new Float32Array(N*3); let V = new Float32Array(N*3); let D = new Float32Array(N);
+    function spawn(){ N = parseInt(count.value,10); P = new Float32Array(N*3); V = new Float32Array(N*3); D = new Float32Array(N); for(let i=0;i<N;i++){ const u1=Math.random(), u2=Math.random(), u3=Math.random(); // random dir
+      const th = 2*Math.PI*u1, z = 2*u2-1, r = Math.sqrt(1-z*z); const dir = {x:r*Math.cos(th), y:r*Math.sin(th), z}; const s = Math.random()*0.02; P[i*3]=dir.x*s; P[i*3+1]=dir.y*s; P[i*3+2]=dir.z*s; const d0 = Math.random()*0.6+0.2; V[i*3]=dir.x*0.6*(0.5+d0); V[i*3+1]=dir.y*0.6*(0.5+d0); V[i*3+2]=dir.z*0.6*(0.5+d0); D[i]=d0; } }
+    spawn();
+
+    let alpha=0, paused=false; resetBtn.addEventListener('click', ()=>{ alpha=0; spawn(); }); pauseBtn.addEventListener('click', ()=>{ paused=!paused; pauseBtn.textContent = paused? 'Resume' : 'Pause'; });
+
+    // Simple camera control (drag to pan)
+    let pan={x:0,y:0}, dragging=false, last2D={x:0,y:0};
+    c.addEventListener('mousedown', e=>{ dragging=true; last2D.x=e.clientX; last2D.y=e.clientY; });
+    window.addEventListener('mouseup', ()=> dragging=false);
+    window.addEventListener('mousemove', e=>{ if(!dragging) return; pan.x += (e.clientX-last2D.x); pan.y += (e.clientY-last2D.y); last2D.x=e.clientX; last2D.y=e.clientY; });
+
+    function update(dt){
+      alpha += dt * parseFloat(rate.value); clearDensity();
+      const twistK = parseFloat(twist.value); const curvK = parseFloat(curv.value);
+      for(let i=0;i<N;i++){
+        const p={x:P[i*3],y:P[i*3+1],z:P[i*3+2]}; const v={x:V[i*3],y:V[i*3+1],z:V[i*3+2]};
+        const gw = gradLogPhi(p,alpha); const Xn = hash3(Math.floor(p.x*7.3), Math.floor(p.y*7.3), Math.floor(p.z*7.3)); const Yn = hash3(Math.floor(p.x*5.1+10.0), Math.floor(p.y*5.1-3.0), Math.floor(p.z*5.1+6.0));
+        const Xl = 1/Math.hypot(Xn.x,Xn.y,Xn.z); const Yl = 1/Math.hypot(Yn.x,Yn.y,Yn.z); const X={x:Xn.x*Xl,y:Xn.y*Xl,z:Xn.z*Xl}, Y={x:Yn.x*Yl,y:Yn.y*Yl,z:Yn.z*Yl};
+        const s1 = X.x*gw.x+X.y*gw.y+X.z*gw.z; const s2 = Y.x*gw.x+Y.y*gw.y+Y.z*gw.z; const dx = Y.x*s1 - X.x*s2, dy = Y.y*s1 - X.y*s2, dz = Y.z*s1 - X.z*s2;
+        v.x += dx * twistK * dt * 0.45; v.y += dy * twistK * dt * 0.45; v.z += dz * twistK * dt * 0.45;
+        const r = Math.hypot(p.x,p.y,p.z); const damp = Math.exp(-Math.max(0, r-6.0)*0.15); v.x *= 0.999*damp; v.y *= 0.999*damp; v.z *= 0.999*damp;
+        V[i*3]=v.x; V[i*3+1]=v.y; V[i*3+2]=v.z;
+      }
+      for(let i=0;i<N;i++){
+        const p={x:P[i*3],y:P[i*3+1],z:P[i*3+2]}; const v={x:V[i*3],y:V[i*3+1],z:V[i*3+2]}; p.x+=v.x*dt; p.y+=v.y*dt; p.z+=v.z*dt; const L=Math.hypot(p.x,p.y,p.z); if(L>BOUNDS){ const s=BOUNDS/(L+1e-6); p.x*=s; p.y*=s; p.z*=s; v.x*=0.8; v.y*=0.8; v.z*=0.8; } P[i*3]=p.x; P[i*3+1]=p.y; P[i*3+2]=p.z; const ix=clamp(Math.floor((p.x+BOUNDS)/CELL),0,GRID-1); const iy=clamp(Math.floor((p.y+BOUNDS)/CELL),0,GRID-1); const iz=clamp(Math.floor((p.z+BOUNDS)/CELL),0,GRID-1); density[idx(ix,iy,iz)] += 1; }
+      const neigh=[[-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1]];
+      function localD(ix,iy,iz){ let F=density[idx(ix,iy,iz)]+1e-6; let G=6.0; for(const [dx,dy,dz] of neigh){ const jx=clamp(ix+dx,0,GRID-1), jy=clamp(iy+dy,0,GRID-1), jz=clamp(iz+dz,0,GRID-1); G += density[idx(jx,jy,jz)]*0.2+1.0; } return F/G; }
+      for(let i=0;i<N;i++){
+        const p={x:P[i*3],y:P[i*3+1],z:P[i*3+2]}; const ix=clamp(Math.floor((p.x+BOUNDS)/CELL),0,GRID-1), iy=clamp(Math.floor((p.y+BOUNDS)/CELL),0,GRID-1), iz=clamp(Math.floor((p.z+BOUNDS)/CELL),0,GRID-1);
+        const c=density[idx(ix,iy,iz)]; let lap=-6.0*c; for(const [dx,dy,dz] of neigh){ lap+=density[idx(clamp(ix+dx,0,GRID-1),clamp(iy+dy,0,GRID-1),clamp(iz+dz,0,GRID-1))]; }
+        const gx=density[idx(clamp(ix+1,0,GRID-1),iy,iz)]-density[idx(clamp(ix-1,0,GRID-1),iy,iz)];
+        const gy=density[idx(ix,clamp(iy+1,0,GRID-1),iz)]-density[idx(ix,clamp(iy-1,0,GRID-1),iz)];
+        const gz=density[idx(ix,iy,clamp(iz+1,0,GRID-1))]-density[idx(ix,iy,clamp(iz-1,0,GRID-1))];
+        V[i*3]   += (-gx*0.0008 + lap*1e-6) * parseFloat(curv.value);
+        V[i*3+1] += (-gy*0.0008 + lap*1e-6) * parseFloat(curv.value);
+        V[i*3+2] += (-gz*0.0008 + lap*1e-6) * parseFloat(curv.value);
+      }
+    }
+
+    function draw(){
+      ctx.clearRect(0,0,c.width,c.height);
+      // simple perspective projection
+      const f = 280; const cx = c.width/2 + pan.x, cy = c.height/2 + pan.y;
+      for(let i=0;i<N;i++){
+        const x=P[i*3], y=P[i*3+1], z=P[i*3+2]; const Dv = 1/(1+Math.max(0, Math.hypot(x,y,z)/8));
+        const px = cx + (x * f) / (z+10);
+        const py = cy + (y * f) / (z+10);
+        const r = 1 + 2*Dv;
+        const hue = 210 + 30*Dv; const sat = 60 + 40*Dv; const light = 50 + 45*Dv;
+        ctx.fillStyle = `hsl(${hue} ${sat}% ${light}% / ${0.6+0.3*Dv})`;
+        ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI*2); ctx.fill();
+      }
+      // stars: sample dense voxels
+      const starThresh = parseFloat(thresh.value);
+      for(let s=0;s<24;s++){
+        const ix=Math.floor(Math.random()*GRID), iy=Math.floor(Math.random()*GRID), iz=Math.floor(Math.random()*GRID);
+        let F=density[idx(ix,iy,iz)]+1e-6; let G=6.0; const neigh=[[-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1]]; for(const [dx,dy,dz] of neigh){ const jx=clamp(ix+dx,0,GRID-1), jy=clamp(iy+dy,0,GRID-1), jz=clamp(iz+dz,0,GRID-1); G += density[idx(jx,jy,jz)]*0.2 + 1.0; }
+        const d=F/G; if(d>=starThresh){ const wx=(ix+0.5)*CELL-BOUNDS, wy=(iy+0.5)*CELL-BOUNDS, wz=(iz+0.5)*CELL-BOUNDS; const px=cx + (wx*f)/(wz+10), py=cy + (wy*f)/(wz+10); const R=2+8*(d-starThresh)/(1-starThresh); const g=ctx.createRadialGradient(px,py,0,px,py,R); g.addColorStop(0,'rgba(255,255,255,0.95)'); g.addColorStop(0.5,'rgba(200,220,255,0.6)'); g.addColorStop(1,'rgba(0,0,0,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,R,0,Math.PI*2); ctx.fill(); }
+      }
+    }
+
+    // Timing loop (unique var name to avoid redeclaration)
+    let last2DTime = performance.now();
+    function loop(){
+      requestAnimationFrame(loop);
+      const now = performance.now();
+      const dt = clamp((now - last2DTime)/1000, 0.001, 0.033);
+      last2DTime = now;
+      if(!paused) update(dt);
+      draw();
+    }
+    loop();
+  }
+})();
+</script>
+</body>
+</html>
